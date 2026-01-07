@@ -46,6 +46,7 @@
         <th>Lot</th>
         <th>PnL</th>
         <th>Mode</th>
+        <th>Account</th>
         <th>Timestamp</th>
       </tr>
     </thead>
@@ -190,6 +191,7 @@
           <td>${t.lot}</td>
           <td style="color:${pnlColor};font-weight:bold">${t.pnl.toFixed(2)}</td>
           <td style="color:${modeColor};font-weight:bold">${t.mode}</td>
+          <td>${t.account || "-"}</td>
           <td>${istStr}</td>
         `
         tradesEl.appendChild(tr)

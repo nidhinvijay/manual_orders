@@ -124,24 +124,32 @@ app.post("/sell", async (req, res) => {
 
     // SIM MODE
     if (config.execution_mode === "SIM") {
-      for (const acc of accounts) {
-        const pos = state[token][acc.name]
-        if (!pos || !pos.buyposition) continue
+      const exit = state[token].ltp || 0
 
-        const exit = state[token].ltp || 0
-        const pnl = (exit - pos.entry) * inst.lot
+      // Find entry from ANY account that has a buy position (assuming identical in SIM)
+      const entryAccName = Object.keys(state[token]).find(k => state[token][k].buyposition)
+      const entry = entryAccName ? state[token][entryAccName].entry : 0
 
+      // Log ONE aggregated trade
+      if (entryAccName) {
+        const pnl = (exit - entry) * inst.lot
         logTrade({
           symbol: inst.symbol,
-          entry: pos.entry,
+          entry,
           exit,
           lot: inst.lot,
           pnl,
-          mode: "SIM"
+          mode: "SIM",
+          account: "NIL"
         })
+      }
 
-        pos.buyposition = false
-        pos.entry = 0
+      // Clear position for ALL accounts
+      for (const acc of accounts) {
+        if (state[token][acc.name]) {
+          state[token][acc.name].buyposition = false
+          state[token][acc.name].entry = 0
+        }
       }
 
       storage.state.set(state)
@@ -176,7 +184,8 @@ app.post("/sell", async (req, res) => {
           exit,
           lot: inst.lot,
           pnl,
-          mode: "LIVE"
+          mode: "LIVE",
+          account: r.account
         })
 
         r.pos.buyposition = false
