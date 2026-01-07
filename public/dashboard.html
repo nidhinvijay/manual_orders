@@ -76,56 +76,64 @@
       const res = await fetch("/buy", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          accountIndex: 0,
-          instrumentToken: token
-        })
+        body: JSON.stringify({ instrumentToken: token })
       })
 
-      const result = await res.json()
+      const data = await res.json()
 
-      if (result.status === "success") {
-        const ltp = state[token]?.ltp || 0
-        state[token] = state[token] || {}
-        state[token].entry = ltp
-        state[token].buyposition = true
-
-        await fetch("/updateState", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token, data: state[token] })
-        })
-      } else {
-        alert(result.message || "Order failed")
-      }
-    }
-
-    async function sell(token) {
-      if (!state[token] || !state[token].buyposition) {
-        alert("No open position to sell")
+      if (!data.results) {
+        alert("Order failed")
         return
       }
 
+      let msg = "BUY RESULTS:\n\n"
+      let anySuccess = false
+
+      data.results.forEach(r => {
+        if (r.result?.status === "success") {
+          msg += `✔ ${r.account}\n`
+          anySuccess = true
+        } else {
+          msg += `✖ ${r.account} → ${r.result?.message || "failed"}\n`
+        }
+      })
+
+      alert(msg)
+
+      await loadState()
+    }
+
+    async function sell(token) {
       const res = await fetch("/sell", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token })
       })
 
-      const result = await res.json()
+      const data = await res.json()
 
-      if (result.status === "success") {
-        state[token].buyposition = false
-        state[token].entry = 0
-
-        await fetch("/updateState", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token, data: state[token] })
-        })
-      } else {
-        alert(result.message || "Sell failed")
+      if (!data.results) {
+        alert("Sell failed")
+        return
       }
+
+      let msg = "SELL RESULTS:\n\n"
+      let anySuccess = false
+
+      data.results.forEach(r => {
+        if (r.result?.status === "success") {
+          msg += `✔ ${r.account}\n`
+          anySuccess = true
+        } else {
+          msg += `✖ ${r.account} → ${r.result?.message || "failed"}\n`
+        }
+      })
+
+      alert(msg)
+
+      // reload state after sell
+      await loadState()
+      await loadTrades()
     }
 
     function renderPositions() {
@@ -134,11 +142,17 @@
       instruments.forEach(i => {
         const s = state[i.token] || {}
         const ltp = s.ltp || 0
-        const entry = s.entry || 0
-        const pnl = s.buyposition ? (ltp - entry) * i.lot : 0
+
+        // Find any account with a buy position
+        const accountKey = Object.keys(s).find(k => k !== "ltp" && s[k].buyposition)
+        const pos = accountKey ? s[accountKey] : {}
+        const entry = pos.entry || 0
+        const buyposition = pos.buyposition
+
+        const pnl = buyposition ? (ltp - entry) * i.lot : 0
         const pnlColor = pnl >= 0 ? "green" : "red"
 
-        const sellDisabled = !s.buyposition ? "disabled" : ""
+        const sellDisabled = !buyposition ? "disabled" : ""
         const tr = document.createElement("tr")
         tr.innerHTML = `
       <td>${i.symbol}</td>

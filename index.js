@@ -14,23 +14,32 @@ const WORKER_URL = "https://zerodha-order-worker.information-710.workers.dev"
 const INTERNAL_KEY = "pass123"
 
 async function placeOrder(account, instrument, side) {
-  const resp = await fetch(WORKER_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-INTERNAL-KEY": INTERNAL_KEY
-    },
-    body: JSON.stringify({
-      api_key: account.api_key,
-      access_token: account.access_token,
-      tradingsymbol: instrument.symbol,
-      exchange: instrument.exchange,
-      transaction_type: side,
-      quantity: instrument.lot
+  try {
+    const resp = await fetch(WORKER_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-INTERNAL-KEY": INTERNAL_KEY
+      },
+      body: JSON.stringify({
+        api_key: account.api_key,
+        access_token: account.access_token,
+        tradingsymbol: instrument.symbol,
+        exchange: instrument.exchange,
+        transaction_type: side,
+        quantity: instrument.lot
+      })
     })
-  })
 
-  return resp.json()
+    if (!resp.ok) {
+      const text = await resp.text()
+      return { status: "error", message: `HTTP ${resp.status}: ${text}` }
+    }
+    return await resp.json()
+  } catch (err) {
+    console.error("placeOrder error:", err)
+    return { status: "error", message: err.message }
+  }
 }
 
 // --- Accounts API ---
@@ -48,98 +57,154 @@ app.post("/accounts/update", (req, res) => {
 })
 
 app.post("/buy", async (req, res) => {
-  const { accountIndex, instrumentToken } = req.body
+  try {
+    const { instrumentToken } = req.body
 
-  const config = storage.config.get()
-  const state = storage.state.get()
+    const accounts = storage.accounts.get()
+    const instruments = storage.instruments.get()
+    const state = storage.state.get()
+    const config = storage.config.get()
 
-  const instrument = storage.instruments.get()
-    .find(i => i.token === instrumentToken)
+    const inst = instruments.find(i => i.token === instrumentToken)
+    state[instrumentToken] = state[instrumentToken] || {}
 
-  if (config.execution_mode === "SIM") {
-    state[instrumentToken] = {
-      buyposition: true,
-      entry: state[instrumentToken]?.ltp || 0
+    // SIM MODE (unchanged, sequential is fine)
+    if (config.execution_mode === "SIM") {
+      const results = []
+      for (const acc of accounts) {
+        state[instrumentToken][acc.name] = {
+          buyposition: true,
+          entry: state[instrumentToken]?.ltp || 0
+        }
+        results.push({
+          account: acc.name,
+          result: { status: "success" }
+        })
+      }
+      storage.state.set(state)
+      return res.json({ results })
     }
-    storage.state.set(state)
 
-    return res.json({ status: "success", mode: "SIM" })
-  }
+    // LIVE MODE — PARALLEL
+    const promises = accounts.map(acc =>
+      placeOrder(acc, inst, "BUY")
+        .then(r => ({ account: acc.name, result: r }))
+    )
 
-  // LIVE MODE
-  const account = storage.accounts.get()[accountIndex]
-  const result = await placeOrder(account, instrument, "BUY")
+    const results = await Promise.all(promises)
 
-  if (result.status === "success") {
-    state[instrumentToken] = {
-      buyposition: true,
-      entry: state[instrumentToken]?.ltp || 0
+    for (const r of results) {
+      if (r.result.status === "success") {
+        state[instrumentToken][r.account] = {
+          buyposition: true,
+          entry: state[instrumentToken]?.ltp || 0
+        }
+      }
     }
-    storage.state.set(state)
-  }
 
-  res.json(result)
+    storage.state.set(state)
+    res.json({ results })
+  } catch (e) {
+    console.error("/buy error:", e)
+    res.status(500).json({ error: e.message })
+  }
 })
-
 
 app.post("/sell", async (req, res) => {
-  const { token } = req.body
+  try {
+    const { token } = req.body
 
-  const config = storage.config.get()
-  const state = storage.state.get()
+    const accounts = storage.accounts.get()
+    const instruments = storage.instruments.get()
+    const state = storage.state.get()
+    const config = storage.config.get()
 
-  if (!state[token] || !state[token].buyposition) {
-    return res.json({ status: "error", message: "No open position" })
-  }
+    const inst = instruments.find(i => i.token === token)
+    if (!state[token]) return res.json({ status: "error", message: "No positions" })
 
-  if (config.execution_mode === "SIM") {
-    const inst = storage.instruments.get().find(i => i.token === token)
+    // SIM MODE
+    if (config.execution_mode === "SIM") {
+      for (const acc of accounts) {
+        const pos = state[token][acc.name]
+        if (!pos || !pos.buyposition) continue
 
-    const entry = state[token].entry
-    const exit = state[token].ltp
-    const pnl = (exit - entry) * inst.lot
+        const exit = state[token].ltp || 0
+        const pnl = (exit - pos.entry) * inst.lot
 
-    // log trade
-    const tradesFile = path.join(__dirname, "data/trades.json")
-    const trades = fs.existsSync(tradesFile)
-      ? JSON.parse(fs.readFileSync(tradesFile))
-      : []
+        logTrade({
+          symbol: inst.symbol,
+          entry: pos.entry,
+          exit,
+          lot: inst.lot,
+          pnl,
+          mode: "SIM"
+        })
 
-    trades.push({
-      symbol: inst.symbol,
-      entry,
-      exit,
-      lot: inst.lot,
-      pnl,
-      timestamp: new Date().toISOString(),
-      mode: "SIM"
-    })
+        pos.buyposition = false
+        pos.entry = 0
+      }
 
-    fs.writeFileSync(tradesFile, JSON.stringify(trades, null, 2))
+      storage.state.set(state)
 
-    // clear position
-    state[token].buyposition = false
-    state[token].entry = 0
+      return res.json({
+        results: accounts.map(acc => ({
+          account: acc.name,
+          result: { status: "success" }
+        }))
+      })
+    }
+
+    // 🔥 LIVE MODE — PARALLEL
+    const promises = accounts.map(acc => {
+      const pos = state[token][acc.name]
+      if (!pos || !pos.buyposition) return null
+
+      return placeOrder(acc, inst, "SELL")
+        .then(r => ({ account: acc.name, result: r, pos }))
+    }).filter(Boolean)
+
+    const results = await Promise.all(promises)
+
+    for (const r of results) {
+      if (r.result.status === "success") {
+        const exit = state[token].ltp || 0
+        const pnl = (exit - r.pos.entry) * inst.lot
+
+        logTrade({
+          symbol: inst.symbol,
+          entry: r.pos.entry,
+          exit,
+          lot: inst.lot,
+          pnl,
+          mode: "LIVE"
+        })
+
+        r.pos.buyposition = false
+        r.pos.entry = 0
+      }
+    }
+
     storage.state.set(state)
-
-    return res.json({ status: "success", mode: "SIM" })
+    res.json({ results })
+  } catch (e) {
+    console.error("/sell error:", e)
+    res.status(500).json({ error: e.message })
   }
-
-
-  // LIVE MODE
-  const account = storage.accounts.get()[0]
-  const instrument = storage.instruments.get()
-    .find(i => i.token === token)
-
-  const result = await placeOrder(account, instrument, "SELL")
-
-  if (result.status === "success") {
-    state[token].buyposition = false
-    storage.state.set(state)
-  }
-
-  res.json(result)
 })
+
+function logTrade(t) {
+  const file = path.join(__dirname, "data/trades.json")
+  const trades = fs.existsSync(file)
+    ? JSON.parse(fs.readFileSync(file))
+    : []
+
+  trades.push({
+    ...t,
+    timestamp: new Date().toISOString()
+  })
+
+  fs.writeFileSync(file, JSON.stringify(trades, null, 2))
+}
 
 // --- Instruments APIs ---
 app.get("/instruments/search", (req, res) => res.json(instruments.search(req.query.q || "")))
