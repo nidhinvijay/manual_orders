@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>Options Dashboard</title>
+</head>
+
+<body style="font-family: Arial, sans-serif; text-align: center; padding: 20px;">
+
+  <h2>Live Options Dashboard</h2>
+
+  <!-- Navigation Links -->
+  <div style="margin-bottom: 20px;">
+    <a href="instruments.html">Instruments</a> |
+    <a href="accounts.html">Accounts</a>
+  </div>
+
+  <div id="mode" style="margin-bottom:10px;font-weight:bold"></div>
+  <button onclick="toggleMode()">Toggle SIM / LIVE</button>
+
+  <!-- Live Positions Table -->
+  <table border="1" cellpadding="8" cellspacing="0"
+    style="margin: 0 auto; border-collapse: collapse; text-align: center;">
+    <thead>
+      <tr style="background-color: #eee;">
+        <th>Symbol</th>
+        <th>LTP</th>
+        <th>Lot</th>
+        <th>Qty</th>
+        <th>Entry</th>
+        <th>PnL</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <h3>Trade History</h3>
+  <table border="1" cellpadding="6" cellspacing="0"
+    style="margin: 0 auto; border-collapse: collapse; text-align: center;">
+    <thead>
+      <tr style="background-color: #eee;">
+        <th>Symbol</th>
+        <th>Entry</th>
+        <th>Exit</th>
+        <th>Lot</th>
+        <th>PnL</th>
+        <th>Mode</th>
+        <th>Timestamp</th>
+      </tr>
+    </thead>
+    <tbody id="trades"></tbody>
+  </table>
+
+  <script>
+    let instruments = []
+    let state = []
+    let trades = []
+
+    async function loadInstruments() {
+      const r = await fetch("/instruments/selected")
+      instruments = await r.json()
+    }
+
+    async function loadState() {
+      const r = await fetch("/ltp")
+      state = await r.json()
+    }
+
+    async function loadTrades() {
+      const r = await fetch("/trades")
+      trades = await r.json()
+    }
+
+    async function buy(token) {
+      const res = await fetch("/buy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accountIndex: 0,
+          instrumentToken: token
+        })
+      })
+
+      const result = await res.json()
+
+      if (result.status === "success") {
+        const ltp = state[token]?.ltp || 0
+        state[token] = state[token] || {}
+        state[token].entry = ltp
+        state[token].buyposition = true
+
+        await fetch("/updateState", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token, data: state[token] })
+        })
+      } else {
+        alert(result.message || "Order failed")
+      }
+    }
+
+    async function sell(token) {
+      if (!state[token] || !state[token].buyposition) {
+        alert("No open position to sell")
+        return
+      }
+
+      const res = await fetch("/sell", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token })
+      })
+
+      const result = await res.json()
+
+      if (result.status === "success") {
+        state[token].buyposition = false
+        state[token].entry = 0
+
+        await fetch("/updateState", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token, data: state[token] })
+        })
+      } else {
+        alert(result.message || "Sell failed")
+      }
+    }
+
+    function renderPositions() {
+      const rowsEl = document.getElementById("rows")
+      rowsEl.innerHTML = ""
+      instruments.forEach(i => {
+        const s = state[i.token] || {}
+        const ltp = s.ltp || 0
+        const entry = s.entry || 0
+        const pnl = s.buyposition ? (ltp - entry) * i.lot : 0
+        const pnlColor = pnl >= 0 ? "green" : "red"
+
+        const sellDisabled = !s.buyposition ? "disabled" : ""
+        const tr = document.createElement("tr")
+        tr.innerHTML = `
+      <td>${i.symbol}</td>
+      <td>${ltp.toFixed(2)}</td>
+      <td>${i.lot}</td>
+      <td>${i.lot}</td>
+      <td>${entry.toFixed(2)}</td>
+      <td style="color: ${pnlColor}; font-weight: bold;">${pnl.toFixed(2)}</td>
+      <td>
+        <button onclick="buy(${i.token})">Buy</button>
+        <button onclick="sell(${i.token})" ${sellDisabled}>Sell</button>
+      </td>
+    `
+        rowsEl.appendChild(tr)
+      })
+    }
+
+    function renderTrades() {
+      const tradesEl = document.getElementById("trades")
+      tradesEl.innerHTML = ""
+
+      trades.forEach(t => {
+        const pnlColor = t.pnl >= 0 ? "green" : "red"
+        const modeColor = t.mode === "LIVE" ? "green" : "orange"
+
+        const dt = new Date(t.timestamp)
+        const ist = new Date(dt.getTime() + 5.5 * 60 * 60 * 1000)
+        const istStr = ist.toISOString().replace("T", " ").split(".")[0]
+
+        const tr = document.createElement("tr")
+        tr.innerHTML = `
+          <td>${t.symbol}</td>
+          <td>${t.entry.toFixed(2)}</td>
+          <td>${t.exit.toFixed(2)}</td>
+          <td>${t.lot}</td>
+          <td style="color:${pnlColor};font-weight:bold">${t.pnl.toFixed(2)}</td>
+          <td style="color:${modeColor};font-weight:bold">${t.mode}</td>
+          <td>${istStr}</td>
+        `
+        tradesEl.appendChild(tr)
+      })
+    }
+
+    let executionMode = "SIM"
+
+    async function loadMode() {
+      const r = await fetch("/mode")
+      const d = await r.json()
+      executionMode = d.execution_mode
+      document.getElementById("mode").innerText =
+        "Execution Mode: " + executionMode
+    }
+
+    async function toggleMode() {
+      const newMode = executionMode === "SIM" ? "LIVE" : "SIM"
+      await fetch("/mode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ execution_mode: newMode })
+      })
+      loadMode()
+    }
+
+    async function loop() {
+      await loadState()
+      await loadTrades()
+      renderPositions()
+      renderTrades()
+    }
+
+    async function start() {
+      await loadInstruments()
+      await loadMode()
+      setInterval(loop, 1000)
+    }
+
+    start()
+  </script>
+</body>
+
+</html>

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Accounts</title>
+</head>
+<body style="font-family: Arial; text-align: center; padding: 20px;">
+<h2>Zerodha Accounts</h2>
+
+<table border="1" cellpadding="6" cellspacing="0" style="margin: 0 auto; text-align: center; border-collapse: collapse;">
+  <thead>
+    <tr style="background-color: #eee;">
+      <th>Name</th>
+      <th>API Key</th>
+      <th>Access Token</th>
+      <th>Capital</th>
+      <th>Action</th>
+    </tr>
+  </thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<h3>Add Account</h3>
+<input placeholder="Name" id="name">
+<input placeholder="API Key" id="api_key">
+<input placeholder="Access Token" id="access_token">
+<input placeholder="Capital" id="capital">
+<button onclick="add()">Add Account</button>
+
+<script>
+async function load() {
+  const r = await fetch("/accounts")
+  const accounts = await r.json()
+  const rowsEl = document.getElementById("rows")
+  rowsEl.innerHTML = ""
+  accounts.forEach((a, i) => {
+    const tr = document.createElement("tr")
+    tr.innerHTML = `
+      <td>${a.name}</td>
+      <td>${a.api_key}</td>
+      <td>${a.access_token}</td>
+      <td>${a.capital}</td>
+      <td><button onclick="del(${i})">Delete</button></td>
+    `
+    rowsEl.appendChild(tr)
+  })
+}
+
+async function add() {
+  const name = document.getElementById("name").value
+  const api_key = document.getElementById("api_key").value
+  const access_token = document.getElementById("access_token").value
+  const capital = parseFloat(document.getElementById("capital").value)
+
+  await fetch("/accounts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, api_key, access_token, capital })
+  })
+  load()
+}
+
+async function del(index) {
+  const r = await fetch("/accounts")
+  const accounts = await r.json()
+  accounts.splice(index, 1)
+  await fetch("/accounts/update", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(accounts)
+  })
+  load()
+}
+
+load()
+</script>
+</body>
+</html>

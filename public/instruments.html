@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Selected Instruments</title>
+</head>
+<body style="font-family: Arial; text-align: center; padding: 20px;">
+<h2>Selected Instruments</h2>
+
+<table border="1" cellpadding="6" cellspacing="0" style="margin: 0 auto; text-align: center; border-collapse: collapse;">
+  <thead>
+    <tr style="background-color: #eee;">
+      <th>Symbol</th>
+      <th>Type</th>
+      <th>Lot</th>
+      <th>Expiry</th>
+      <th>Strike</th>
+      <th>Action</th>
+    </tr>
+  </thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<h3>Add Instrument (Search)</h3>
+<input placeholder="Symbol" id="q">
+<button onclick="search()">Search</button>
+<div id="searchResults"></div>
+
+<script>
+async function load() {
+  const r = await fetch("/instruments/selected")
+  const instruments = await r.json()
+  const rowsEl = document.getElementById("rows")
+  rowsEl.innerHTML = ""
+  instruments.forEach((i, idx) => {
+    const tr = document.createElement("tr")
+    tr.innerHTML = `
+      <td>${i.symbol}</td>
+      <td>${i.type}</td>
+      <td>${i.lot}</td>
+      <td>${i.expiry}</td>
+      <td>${i.strike}</td>
+      <td><button onclick="del(${idx})">Delete</button></td>
+    `
+    rowsEl.appendChild(tr)
+  })
+}
+
+async function del(index) {
+  const r = await fetch("/instruments/selected")
+  const instruments = await r.json()
+  instruments.splice(index, 1)
+  await fetch("/instruments/update", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(instruments)
+  })
+  load()
+}
+
+async function search() {
+  const q = document.getElementById("q").value
+  const r = await fetch(`/instruments/search?q=${q}`)
+  const results = await r.json()
+  const div = document.getElementById("searchResults")
+  div.innerHTML = ""
+  results.forEach(r => {
+    const btn = document.createElement("button")
+    btn.innerText = `Select ${r.symbol}`
+    btn.onclick = async () => {
+      await fetch("/instruments/select", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: r.token })
+      })
+      load()
+    }
+    div.appendChild(btn)
+    div.appendChild(document.createElement("br"))
+  })
+}
+
+load()
+</script>
+</body>
+</html>
