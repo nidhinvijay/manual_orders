@@ -3,6 +3,7 @@
 
 <head>
   <title>Options Dashboard</title>
+  <script src="/socket.io/socket.io.js"></script>
 </head>
 
 <body style="font-family: Arial, sans-serif; text-align: center; padding: 20px;">
@@ -17,10 +18,11 @@
 
   <div id="mode" style="margin-bottom:10px;font-weight:bold"></div>
   <button onclick="toggleMode()">Toggle SIM / LIVE</button>
+  <div id="connection" style="margin-top:5px;font-size:12px;color:gray"></div>
 
   <!-- Live Positions Table -->
   <table border="1" cellpadding="8" cellspacing="0"
-    style="margin: 0 auto; border-collapse: collapse; text-align: center;">
+    style="margin: 20px auto; border-collapse: collapse; text-align: center;">
     <thead>
       <tr style="background-color: #eee;">
         <th>Symbol</th>
@@ -54,23 +56,75 @@
   </table>
 
   <script>
-    let instruments = []
-    let state = []
-    let trades = []
+    // Socket.IO connection
+    const socket = io()
 
+    let instruments = []
+    let state = {}
+    let trades = []
+    let executionMode = "SIM"
+
+    // Connection status
+    socket.on("connect", () => {
+      document.getElementById("connection").innerText = "🟢 Connected"
+      document.getElementById("connection").style.color = "green"
+    })
+
+    socket.on("disconnect", () => {
+      document.getElementById("connection").innerText = "🔴 Disconnected"
+      document.getElementById("connection").style.color = "red"
+    })
+
+    // Socket.IO event handlers
+    socket.on("state", (s) => {
+      state = s
+      renderPositions()
+    })
+
+    socket.on("mode", (m) => {
+      executionMode = m.execution_mode
+      document.getElementById("mode").innerText = "Execution Mode: " + executionMode
+    })
+
+    socket.on("ltp", (updates) => {
+      updates.forEach(u => {
+        if (state[u.token]) {
+          state[u.token].ltp = u.ltp
+        } else {
+          state[u.token] = { ltp: u.ltp }
+        }
+      })
+      renderPositions()
+    })
+
+    socket.on("position", (data) => {
+      state[data.token] = data.state
+      renderPositions()
+    })
+
+    socket.on("trade", (trade) => {
+      trades.push(trade)
+      renderTrades()
+    })
+
+    // Initial data load (one-time, not polling)
     async function loadInstruments() {
       const r = await fetch("/instruments/selected")
       instruments = await r.json()
-    }
-
-    async function loadState() {
-      const r = await fetch("/ltp")
-      state = await r.json()
+      renderPositions()
     }
 
     async function loadTrades() {
       const r = await fetch("/trades")
       trades = await r.json()
+      renderTrades()
+    }
+
+    async function loadMode() {
+      const r = await fetch("/mode")
+      const d = await r.json()
+      executionMode = d.execution_mode
+      document.getElementById("mode").innerText = "Execution Mode: " + executionMode
     }
 
     async function buy(token) {
@@ -88,20 +142,15 @@
       }
 
       let msg = "BUY RESULTS:\n\n"
-      let anySuccess = false
-
       data.results.forEach(r => {
         if (r.result?.status === "success") {
           msg += `✔ ${r.account}\n`
-          anySuccess = true
         } else {
           msg += `✖ ${r.account} → ${r.result?.message || "failed"}\n`
         }
       })
 
       alert(msg)
-
-      await loadState()
     }
 
     async function sell(token) {
@@ -119,22 +168,15 @@
       }
 
       let msg = "SELL RESULTS:\n\n"
-      let anySuccess = false
-
       data.results.forEach(r => {
         if (r.result?.status === "success") {
           msg += `✔ ${r.account}\n`
-          anySuccess = true
         } else {
           msg += `✖ ${r.account} → ${r.result?.message || "failed"}\n`
         }
       })
 
       alert(msg)
-
-      // reload state after sell
-      await loadState()
-      await loadTrades()
     }
 
     function renderPositions() {
@@ -198,16 +240,6 @@
       })
     }
 
-    let executionMode = "SIM"
-
-    async function loadMode() {
-      const r = await fetch("/mode")
-      const d = await r.json()
-      executionMode = d.execution_mode
-      document.getElementById("mode").innerText =
-        "Execution Mode: " + executionMode
-    }
-
     async function toggleMode() {
       const newMode = executionMode === "SIM" ? "LIVE" : "SIM"
       await fetch("/mode", {
@@ -215,20 +247,14 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ execution_mode: newMode })
       })
-      loadMode()
+      // Mode will be updated via socket.on("mode")
     }
 
-    async function loop() {
-      await loadState()
-      await loadTrades()
-      renderPositions()
-      renderTrades()
-    }
-
+    // Start - load initial data once
     async function start() {
       await loadInstruments()
       await loadMode()
-      setInterval(loop, 1000)
+      await loadTrades()
     }
 
     start()

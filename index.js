@@ -1,14 +1,34 @@
 const express = require("express")
 const fs = require("fs")
 const path = require("path")
+const http = require("http")
+const { Server } = require("socket.io")
 const { KiteTicker } = require("kiteconnect")
 const storage = require("./storage")
 const instruments = require("./instruments")
 const tradesFile = path.join(__dirname, "data/trades.json")
 
 const app = express()
+const server = http.createServer(app)
+const io = new Server(server, {
+  cors: { origin: "*" }
+})
+
 app.use(express.json())
 app.use(express.static(path.join(__dirname, "public")))
+
+// Socket.IO connection handler
+io.on("connection", (socket) => {
+  console.log("Client connected:", socket.id)
+
+  // Send current state on connect
+  socket.emit("state", storage.state.get())
+  socket.emit("mode", storage.config.get())
+
+  socket.on("disconnect", () => {
+    console.log("Client disconnected:", socket.id)
+  })
+})
 
 const WORKER_URL = "https://zerodha-order-worker.information-710.workers.dev"
 const INTERNAL_KEY = "pass123"
@@ -82,6 +102,7 @@ app.post("/buy", async (req, res) => {
         })
       }
       storage.state.set(state)
+      io.emit("position", { token: instrumentToken, state: state[instrumentToken] })
       return res.json({ results })
     }
 
@@ -103,6 +124,7 @@ app.post("/buy", async (req, res) => {
     }
 
     storage.state.set(state)
+    io.emit("position", { token: instrumentToken, state: state[instrumentToken] })
     res.json({ results })
   } catch (e) {
     console.error("/buy error:", e)
@@ -153,6 +175,8 @@ app.post("/sell", async (req, res) => {
       }
 
       storage.state.set(state)
+      io.emit("position", { token, state: state[token] })
+      io.emit("trade", { symbol: inst.symbol, entry, exit, lot: inst.lot, pnl: (exit - entry) * inst.lot, mode: "SIM", account: "NIL" })
 
       return res.json({
         results: accounts.map(acc => ({
@@ -194,6 +218,7 @@ app.post("/sell", async (req, res) => {
     }
 
     storage.state.set(state)
+    io.emit("position", { token, state: state[token] })
     res.json({ results })
   } catch (e) {
     console.error("/sell error:", e)
@@ -207,12 +232,16 @@ function logTrade(t) {
     ? JSON.parse(fs.readFileSync(file))
     : []
 
-  trades.push({
+  const trade = {
     ...t,
     timestamp: new Date().toISOString()
-  })
+  }
 
+  trades.push(trade)
   fs.writeFileSync(file, JSON.stringify(trades, null, 2))
+
+  // Emit trade event to all connected clients
+  io.emit("trade", trade)
 }
 
 // --- Instruments APIs ---
@@ -224,6 +253,9 @@ app.post("/instruments/select", (req, res) => {
   if (!selected.find(i => i.token === inst.token)) {
     selected.push(inst)
     storage.instruments.set(selected)
+
+    // Dynamically subscribe to the new token
+    subscribeNewToken(inst.token)
   }
   res.json({ ok: true })
 })
@@ -234,6 +266,16 @@ app.post("/instruments/update", (req, res) => {
   res.json({ ok: true })
 })
 
+// Re-subscribe all instruments to ticker
+app.post("/instruments/resubscribe", (req, res) => {
+  const selected = storage.instruments.get()
+  let subscribed = 0
+  selected.forEach(inst => {
+    if (subscribeNewToken(inst.token)) subscribed++
+  })
+  res.json({ ok: true, subscribed })
+})
+
 // Mode selection
 app.get("/mode", (req, res) => {
   res.json(storage.config.get())
@@ -242,6 +284,7 @@ app.get("/mode", (req, res) => {
 app.post("/mode", (req, res) => {
   const { execution_mode } = req.body
   storage.config.set({ execution_mode })
+  io.emit("mode", { execution_mode })
   res.json({ ok: true, execution_mode })
 })
 
@@ -281,29 +324,47 @@ app.post("/trades/add", (req, res) => {
 
 
 // --- KiteTicker setup ---
-const accounts = storage.accounts.get()
-const selectedInstruments = storage.instruments.get()
-if (accounts.length === 0 || selectedInstruments.length === 0) {
-  console.log("No accounts or instruments selected")
-} else {
+let ticker = null
+const subscribedTokens = new Set()
+
+function initTicker() {
+  const accounts = storage.accounts.get()
+  const selectedInstruments = storage.instruments.get()
+
+  if (accounts.length === 0) {
+    console.log("No accounts found - ticker not started")
+    return
+  }
+
   const primary = accounts[0]
-  const ticker = new KiteTicker({ api_key: primary.api_key, access_token: primary.access_token })
+  ticker = new KiteTicker({ api_key: primary.api_key, access_token: primary.access_token })
   const tokens = selectedInstruments.map(i => i.token)
 
   ticker.on("connect", () => {
     console.log("Ticker connected")
-    ticker.subscribe(tokens)
-    ticker.setMode(ticker.modeFull, tokens)
+    if (tokens.length > 0) {
+      ticker.subscribe(tokens)
+      ticker.setMode(ticker.modeFull, tokens)
+      tokens.forEach(t => subscribedTokens.add(t))
+      console.log("Subscribed to", tokens.length, "instruments")
+    }
   })
 
   ticker.on("ticks", ticks => {
     const st = storage.state.get()
+    const ltpUpdates = []
+
     ticks.forEach(t => {
       const tok = t.instrument_token
       st[tok] = st[tok] || {}
       st[tok].ltp = t.last_price
+      ltpUpdates.push({ token: tok, ltp: t.last_price })
     })
+
     storage.state.set(st)
+
+    // Push LTP updates to all connected browsers
+    io.emit("ltp", ltpUpdates)
   })
 
   ticker.on("error", err => console.error("Ticker error:", err.message))
@@ -311,6 +372,30 @@ if (accounts.length === 0 || selectedInstruments.length === 0) {
   ticker.connect()
 }
 
+// Subscribe to a new token dynamically
+function subscribeNewToken(token) {
+  if (!ticker || !ticker.connected) {
+    console.log("Ticker not connected, cannot subscribe to", token)
+    return false
+  }
+
+  if (subscribedTokens.has(token)) {
+    console.log("Token", token, "already subscribed")
+    return true
+  }
+
+  ticker.subscribe([token])
+  ticker.setMode(ticker.modeFull, [token])
+  subscribedTokens.add(token)
+  console.log("Dynamically subscribed to token:", token)
+  return true
+}
+
+// Initialize ticker
+initTicker()
+
 // --- Start server ---
 const PORT = 3000
-app.listen(PORT, () => console.log(`Server running on port localhost:${PORT}`))
+server.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`))
+
+
