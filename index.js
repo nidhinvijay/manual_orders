@@ -78,7 +78,11 @@ app.post("/accounts/update", (req, res) => {
 
 app.post("/buy", async (req, res) => {
   try {
-    const { instrumentToken } = req.body
+    const { instrumentToken, stoploss, takeprofit } = req.body
+
+    // Parse SL/TP - null means disabled
+    const sl = stoploss ? parseFloat(stoploss) : null
+    const tp = takeprofit ? parseFloat(takeprofit) : null
 
     const accounts = storage.accounts.get()
     const instruments = storage.instruments.get()
@@ -88,13 +92,15 @@ app.post("/buy", async (req, res) => {
     const inst = instruments.find(i => i.token === instrumentToken)
     state[instrumentToken] = state[instrumentToken] || {}
 
-    // SIM MODE (unchanged, sequential is fine)
+    // SIM MODE
     if (config.execution_mode === "SIM") {
       const results = []
       for (const acc of accounts) {
         state[instrumentToken][acc.name] = {
           buyposition: true,
-          entry: state[instrumentToken]?.ltp || 0
+          entry: state[instrumentToken]?.ltp || 0,
+          stoploss: sl,
+          takeprofit: tp
         }
         results.push({
           account: acc.name,
@@ -118,7 +124,9 @@ app.post("/buy", async (req, res) => {
       if (r.result.status === "success") {
         state[instrumentToken][r.account] = {
           buyposition: true,
-          entry: state[instrumentToken]?.ltp || 0
+          entry: state[instrumentToken]?.ltp || 0,
+          stoploss: sl,
+          takeprofit: tp
         }
       }
     }
@@ -162,7 +170,8 @@ app.post("/sell", async (req, res) => {
           lot: inst.lot,
           pnl,
           mode: "SIM",
-          account: "NIL"
+          account: "NIL",
+          exit_reason: "MANUAL"
         })
       }
 
@@ -176,7 +185,7 @@ app.post("/sell", async (req, res) => {
 
       storage.state.set(state)
       io.emit("position", { token, state: state[token] })
-      io.emit("trade", { symbol: inst.symbol, entry, exit, lot: inst.lot, pnl: (exit - entry) * inst.lot, mode: "SIM", account: "NIL" })
+      io.emit("trade", { symbol: inst.symbol, entry, exit, lot: inst.lot, pnl: (exit - entry) * inst.lot, mode: "SIM", account: "NIL", exit_reason: "MANUAL" })
 
       return res.json({
         results: accounts.map(acc => ({
@@ -209,7 +218,8 @@ app.post("/sell", async (req, res) => {
           lot: inst.lot,
           pnl,
           mode: "LIVE",
-          account: r.account
+          account: r.account,
+          exit_reason: "MANUAL"
         })
 
         r.pos.buyposition = false
@@ -299,6 +309,34 @@ app.post("/updateState", (req, res) => {
   res.json({ ok: true })
 })
 
+// Update SL/TP for existing position
+app.post("/position/sltp", (req, res) => {
+  const { token, stoploss, takeprofit } = req.body
+
+  const st = storage.state.get()
+  if (!st[token]) {
+    return res.status(400).json({ error: "No position for this token" })
+  }
+
+  // Update SL/TP for all accounts with position
+  const accounts = storage.accounts.get()
+  let updated = 0
+
+  for (const acc of accounts) {
+    if (st[token][acc.name] && st[token][acc.name].buyposition) {
+      st[token][acc.name].stoploss = stoploss === "" || stoploss === null ? null : parseFloat(stoploss)
+      st[token][acc.name].takeprofit = takeprofit === "" || takeprofit === null ? null : parseFloat(takeprofit)
+      updated++
+    }
+  }
+
+  storage.state.set(st)
+  io.emit("position", { token, state: st[token] })
+
+  console.log(`Updated SL/TP for token ${token}: SL=${stoploss}, TP=${takeprofit}`)
+  res.json({ ok: true, updated })
+})
+
 
 app.get("/trades", (req, res) => {
   const trades = fs.existsSync(tradesFile) ? JSON.parse(fs.readFileSync(tradesFile)) : []
@@ -321,6 +359,66 @@ app.post("/trades/add", (req, res) => {
   fs.writeFileSync(tradesFile, JSON.stringify(trades, null, 2))
   res.json({ ok: true })
 })
+
+
+// --- Auto Sell Function (for SL/TP) ---
+async function autoSell(token, account, instrument, position, exitPrice, reason, mode, state) {
+  console.log(`⚡ Auto-selling ${instrument.symbol} for ${account.name} - Reason: ${reason}`)
+
+  const pnl = (exitPrice - position.entry) * instrument.lot
+
+  // Place sell order (for LIVE mode)
+  if (mode === "LIVE") {
+    const result = await placeOrder(account, instrument, "SELL")
+    if (result.status !== "success") {
+      console.error(`❌ Auto-sell failed for ${account.name}:`, result.message)
+      io.emit("alert", {
+        type: "ERROR",
+        message: `Auto-sell failed for ${account.name}: ${result.message}`,
+        token,
+        account: account.name
+      })
+      return
+    }
+  }
+
+  // Update position state
+  state[token][account.name].buyposition = false
+  state[token][account.name].entry = 0
+  state[token][account.name].stoploss = null
+  state[token][account.name].takeprofit = null
+
+  // Log the trade
+  const trade = {
+    symbol: instrument.symbol,
+    entry: position.entry,
+    exit: exitPrice,
+    lot: instrument.lot,
+    pnl,
+    mode,
+    account: mode === "SIM" ? "NIL" : account.name,
+    exit_reason: reason,
+    timestamp: new Date().toISOString()
+  }
+
+  const tradesFilePath = path.join(__dirname, "data/trades.json")
+  const trades = fs.existsSync(tradesFilePath) ? JSON.parse(fs.readFileSync(tradesFilePath)) : []
+  trades.push(trade)
+  fs.writeFileSync(tradesFilePath, JSON.stringify(trades, null, 2))
+
+  // Emit events to browser
+  io.emit("trade", trade)
+  io.emit("position", { token, state: state[token] })
+  io.emit("alert", {
+    type: reason,
+    message: `${reason} hit! ${instrument.symbol} sold at ${exitPrice.toFixed(2)} | PnL: ${pnl.toFixed(2)}`,
+    token,
+    account: account.name,
+    pnl
+  })
+
+  console.log(`✅ Auto-sell complete: ${instrument.symbol} | ${reason} | PnL: ${pnl.toFixed(2)}`)
+}
 
 
 // --- KiteTicker setup ---
@@ -353,12 +451,47 @@ function initTicker() {
   ticker.on("ticks", ticks => {
     const st = storage.state.get()
     const ltpUpdates = []
+    const instruments = storage.instruments.get()
+    const accounts = storage.accounts.get()
+    const config = storage.config.get()
 
     ticks.forEach(t => {
       const tok = t.instrument_token
+      const ltp = t.last_price
       st[tok] = st[tok] || {}
-      st[tok].ltp = t.last_price
-      ltpUpdates.push({ token: tok, ltp: t.last_price })
+      st[tok].ltp = ltp
+      ltpUpdates.push({ token: tok, ltp })
+
+      // Check SL/TP for each account with position
+      for (const acc of accounts) {
+        const pos = st[tok][acc.name]
+        if (!pos || !pos.buyposition) continue
+
+        let triggerReason = null
+
+        // Check Stop Loss
+        if (pos.stoploss !== null && pos.stoploss !== undefined && ltp <= pos.stoploss) {
+          triggerReason = "STOPLOSS"
+        }
+        // Check Take Profit
+        else if (pos.takeprofit !== null && pos.takeprofit !== undefined && ltp >= pos.takeprofit) {
+          triggerReason = "TAKEPROFIT"
+        }
+
+        if (triggerReason) {
+          console.log(`🔔 ${triggerReason} triggered for ${tok} - Account: ${acc.name}, LTP: ${ltp}`)
+
+          // Find instrument details
+          const inst = instruments.find(i => i.token === tok)
+          if (!inst) continue
+
+          // Calculate PnL
+          const pnl = (ltp - pos.entry) * inst.lot
+
+          // Execute auto-sell
+          autoSell(tok, acc, inst, pos, ltp, triggerReason, config.execution_mode, st)
+        }
+      }
     })
 
     storage.state.set(st)

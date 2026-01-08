@@ -4,13 +4,150 @@
 <head>
   <title>Options Dashboard</title>
   <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+
+    table {
+      margin: 20px auto;
+      border-collapse: collapse;
+      background: white;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    }
+
+    th,
+    td {
+      padding: 10px 12px;
+      border: 1px solid #ddd;
+    }
+
+    th {
+      background: #333;
+      color: white;
+    }
+
+    input[type="number"] {
+      width: 60px;
+      padding: 4px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+
+    button {
+      padding: 6px 12px;
+      margin: 2px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .btn-buy {
+      background: #28a745;
+      color: white;
+    }
+
+    .btn-sell {
+      background: #dc3545;
+      color: white;
+    }
+
+    .btn-edit {
+      background: #007bff;
+      color: white;
+    }
+
+    .btn-save {
+      background: #17a2b8;
+      color: white;
+    }
+
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+
+    .pnl-positive {
+      color: green;
+      font-weight: bold;
+    }
+
+    .pnl-negative {
+      color: red;
+      font-weight: bold;
+    }
+
+    .mode-sim {
+      color: orange;
+      font-weight: bold;
+    }
+
+    .mode-live {
+      color: green;
+      font-weight: bold;
+    }
+
+    .sl-tp-cell {
+      font-size: 12px;
+    }
+
+    .sl-value {
+      color: #dc3545;
+    }
+
+    .tp-value {
+      color: #28a745;
+    }
+
+    #connection {
+      margin-top: 5px;
+      font-size: 12px;
+    }
+
+    .alert-popup {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      padding: 15px 25px;
+      border-radius: 8px;
+      color: white;
+      font-weight: bold;
+      z-index: 1000;
+      animation: slideIn 0.3s ease;
+    }
+
+    .alert-stoploss {
+      background: #dc3545;
+    }
+
+    .alert-takeprofit {
+      background: #28a745;
+    }
+
+    .alert-error {
+      background: #fd7e14;
+    }
+
+    @keyframes slideIn {
+      from {
+        transform: translateX(100%);
+        opacity: 0;
+      }
+
+      to {
+        transform: translateX(0);
+        opacity: 1;
+      }
+    }
+  </style>
 </head>
 
-<body style="font-family: Arial, sans-serif; text-align: center; padding: 20px;">
-
+<body>
   <h2>Live Options Dashboard</h2>
 
-  <!-- Navigation Links -->
   <div style="margin-bottom: 20px;">
     <a href="instruments.html">Instruments</a> |
     <a href="accounts.html">Accounts</a>
@@ -18,18 +155,19 @@
 
   <div id="mode" style="margin-bottom:10px;font-weight:bold"></div>
   <button onclick="toggleMode()">Toggle SIM / LIVE</button>
-  <div id="connection" style="margin-top:5px;font-size:12px;color:gray"></div>
+  <div id="connection"></div>
 
-  <!-- Live Positions Table -->
-  <table border="1" cellpadding="8" cellspacing="0"
-    style="margin: 20px auto; border-collapse: collapse; text-align: center;">
+  <div id="alerts"></div>
+
+  <table>
     <thead>
-      <tr style="background-color: #eee;">
+      <tr>
         <th>Symbol</th>
         <th>LTP</th>
         <th>Lot</th>
-        <th>Qty</th>
         <th>Entry</th>
+        <th>SL</th>
+        <th>TP</th>
         <th>PnL</th>
         <th>Action</th>
       </tr>
@@ -38,16 +176,16 @@
   </table>
 
   <h3>Trade History</h3>
-  <table border="1" cellpadding="6" cellspacing="0"
-    style="margin: 0 auto; border-collapse: collapse; text-align: center;">
+  <table>
     <thead>
-      <tr style="background-color: #eee;">
+      <tr>
         <th>Symbol</th>
         <th>Entry</th>
         <th>Exit</th>
         <th>Lot</th>
         <th>PnL</th>
         <th>Mode</th>
+        <th>Exit Reason</th>
         <th>Account</th>
         <th>Timestamp</th>
       </tr>
@@ -56,22 +194,22 @@
   </table>
 
   <script>
-    // Socket.IO connection
     const socket = io()
 
     let instruments = []
     let state = {}
     let trades = []
     let executionMode = "SIM"
+    let editingToken = null  // Track which row is being edited
 
     // Connection status
     socket.on("connect", () => {
-      document.getElementById("connection").innerText = "🟢 Connected"
+      document.getElementById("connection").innerHTML = "🟢 Connected"
       document.getElementById("connection").style.color = "green"
     })
 
     socket.on("disconnect", () => {
-      document.getElementById("connection").innerText = "🔴 Disconnected"
+      document.getElementById("connection").innerHTML = "🔴 Disconnected"
       document.getElementById("connection").style.color = "red"
     })
 
@@ -107,7 +245,25 @@
       renderTrades()
     })
 
-    // Initial data load (one-time, not polling)
+    // Alert handler
+    socket.on("alert", (alert) => {
+      showAlert(alert)
+    })
+
+    function showAlert(alert) {
+      const alertsDiv = document.getElementById("alerts")
+      const alertEl = document.createElement("div")
+      alertEl.className = `alert-popup alert-${alert.type.toLowerCase()}`
+      alertEl.innerText = alert.message
+      alertsDiv.appendChild(alertEl)
+
+      // Auto-remove after 5 seconds
+      setTimeout(() => {
+        alertEl.remove()
+      }, 5000)
+    }
+
+    // Initial data load
     async function loadInstruments() {
       const r = await fetch("/instruments/selected")
       instruments = await r.json()
@@ -128,10 +284,16 @@
     }
 
     async function buy(token) {
+      const slInput = document.getElementById(`sl-input-${token}`)
+      const tpInput = document.getElementById(`tp-input-${token}`)
+
+      const stoploss = slInput?.value || null
+      const takeprofit = tpInput?.value || null
+
       const res = await fetch("/buy", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instrumentToken: token })
+        body: JSON.stringify({ instrumentToken: token, stoploss, takeprofit })
       })
 
       const data = await res.json()
@@ -179,36 +341,108 @@
       alert(msg)
     }
 
+    function startEdit(token) {
+      editingToken = token
+      renderPositions()
+    }
+
+    function cancelEdit() {
+      editingToken = null
+      renderPositions()
+    }
+
+    async function saveSLTP(token) {
+      const slInput = document.getElementById(`sl-edit-${token}`)
+      const tpInput = document.getElementById(`tp-edit-${token}`)
+
+      const stoploss = slInput?.value || null
+      const takeprofit = tpInput?.value || null
+
+      await fetch("/position/sltp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, stoploss, takeprofit })
+      })
+
+      editingToken = null
+      // Position update will come via socket
+    }
+
     function renderPositions() {
       const rowsEl = document.getElementById("rows")
       rowsEl.innerHTML = ""
+
       instruments.forEach(i => {
         const s = state[i.token] || {}
         const ltp = s.ltp || 0
 
         // Find any account with a buy position
-        const accountKey = Object.keys(s).find(k => k !== "ltp" && s[k].buyposition)
+        const accountKey = Object.keys(s).find(k => k !== "ltp" && s[k]?.buyposition)
         const pos = accountKey ? s[accountKey] : {}
         const entry = pos.entry || 0
         const buyposition = pos.buyposition
+        const sl = pos.stoploss
+        const tp = pos.takeprofit
 
         const pnl = buyposition ? (ltp - entry) * i.lot : 0
-        const pnlColor = pnl >= 0 ? "green" : "red"
+        const pnlClass = pnl >= 0 ? "pnl-positive" : "pnl-negative"
 
-        const sellDisabled = !buyposition ? "disabled" : ""
+        const isEditing = editingToken === i.token && buyposition
+
         const tr = document.createElement("tr")
-        tr.innerHTML = `
-      <td>${i.symbol}</td>
-      <td>${ltp.toFixed(2)}</td>
-      <td>${i.lot}</td>
-      <td>${i.lot}</td>
-      <td>${entry.toFixed(2)}</td>
-      <td style="color: ${pnlColor}; font-weight: bold;">${pnl.toFixed(2)}</td>
-      <td>
-        <button onclick="buy(${i.token})">Buy</button>
-        <button onclick="sell(${i.token})" ${sellDisabled}>Sell</button>
-      </td>
-    `
+
+        if (buyposition) {
+          // Active position row
+          if (isEditing) {
+            // Editing mode
+            tr.innerHTML = `
+              <td>${i.symbol}</td>
+              <td>${ltp.toFixed(2)}</td>
+              <td>${i.lot}</td>
+              <td>${entry.toFixed(2)}</td>
+              <td><input type="number" id="sl-edit-${i.token}" value="${sl || ''}" placeholder="SL" step="0.05"></td>
+              <td><input type="number" id="tp-edit-${i.token}" value="${tp || ''}" placeholder="TP" step="0.05"></td>
+              <td class="${pnlClass}">${pnl.toFixed(2)}</td>
+              <td>
+                <button class="btn-save" onclick="saveSLTP(${i.token})">Save</button>
+                <button onclick="cancelEdit()">Cancel</button>
+              </td>
+            `
+          } else {
+            // Display mode
+            const slDisplay = sl !== null && sl !== undefined ? `<span class="sl-value">${sl.toFixed(2)}</span>` : '--'
+            const tpDisplay = tp !== null && tp !== undefined ? `<span class="tp-value">${tp.toFixed(2)}</span>` : '--'
+
+            tr.innerHTML = `
+              <td>${i.symbol}</td>
+              <td>${ltp.toFixed(2)}</td>
+              <td>${i.lot}</td>
+              <td>${entry.toFixed(2)}</td>
+              <td class="sl-tp-cell">${slDisplay}</td>
+              <td class="sl-tp-cell">${tpDisplay}</td>
+              <td class="${pnlClass}">${pnl.toFixed(2)}</td>
+              <td>
+                <button class="btn-edit" onclick="startEdit(${i.token})">Edit</button>
+                <button class="btn-sell" onclick="sell(${i.token})">Sell</button>
+              </td>
+            `
+          }
+        } else {
+          // No position - show buy inputs
+          tr.innerHTML = `
+            <td>${i.symbol}</td>
+            <td>${ltp.toFixed(2)}</td>
+            <td>${i.lot}</td>
+            <td>--</td>
+            <td><input type="number" id="sl-input-${i.token}" placeholder="SL" step="0.05"></td>
+            <td><input type="number" id="tp-input-${i.token}" placeholder="TP" step="0.05"></td>
+            <td>--</td>
+            <td>
+              <button class="btn-buy" onclick="buy(${i.token})">Buy</button>
+            </td>
+          `
+        }
+
         rowsEl.appendChild(tr)
       })
     }
@@ -217,13 +451,20 @@
       const tradesEl = document.getElementById("trades")
       tradesEl.innerHTML = ""
 
-      trades.forEach(t => {
-        const pnlColor = t.pnl >= 0 ? "green" : "red"
-        const modeColor = t.mode === "LIVE" ? "green" : "orange"
+      // Show newest first
+      const sortedTrades = [...trades].reverse()
+
+      sortedTrades.forEach(t => {
+        const pnlClass = t.pnl >= 0 ? "pnl-positive" : "pnl-negative"
+        const modeClass = t.mode === "LIVE" ? "mode-live" : "mode-sim"
 
         const dt = new Date(t.timestamp)
         const ist = new Date(dt.getTime() + 5.5 * 60 * 60 * 1000)
         const istStr = ist.toISOString().replace("T", " ").split(".")[0]
+
+        const exitReason = t.exit_reason || "MANUAL"
+        const reasonClass = exitReason === "STOPLOSS" ? "pnl-negative" :
+          exitReason === "TAKEPROFIT" ? "pnl-positive" : ""
 
         const tr = document.createElement("tr")
         tr.innerHTML = `
@@ -231,8 +472,9 @@
           <td>${t.entry.toFixed(2)}</td>
           <td>${t.exit.toFixed(2)}</td>
           <td>${t.lot}</td>
-          <td style="color:${pnlColor};font-weight:bold">${t.pnl.toFixed(2)}</td>
-          <td style="color:${modeColor};font-weight:bold">${t.mode}</td>
+          <td class="${pnlClass}">${t.pnl.toFixed(2)}</td>
+          <td class="${modeClass}">${t.mode}</td>
+          <td class="${reasonClass}">${exitReason}</td>
           <td>${t.account || "-"}</td>
           <td>${istStr}</td>
         `
@@ -247,10 +489,8 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ execution_mode: newMode })
       })
-      // Mode will be updated via socket.on("mode")
     }
 
-    // Start - load initial data once
     async function start() {
       await loadInstruments()
       await loadMode()
