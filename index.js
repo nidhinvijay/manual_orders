@@ -33,7 +33,7 @@ io.on("connection", (socket) => {
 const WORKER_URL = "https://zerodha-order-worker.information-710.workers.dev"
 const INTERNAL_KEY = "pass123"
 
-async function placeOrder(account, instrument, side) {
+async function placeOrder(account, instrument, side, quantity) {
   try {
     const resp = await fetch(WORKER_URL, {
       method: "POST",
@@ -47,7 +47,7 @@ async function placeOrder(account, instrument, side) {
         tradingsymbol: instrument.symbol,
         exchange: instrument.exchange,
         transaction_type: side,
-        quantity: instrument.lot
+        quantity: quantity
       })
     })
 
@@ -92,31 +92,60 @@ app.post("/buy", async (req, res) => {
     const inst = instruments.find(i => i.token === instrumentToken)
     state[instrumentToken] = state[instrumentToken] || {}
 
+    const ltp = state[instrumentToken]?.ltp || 0
+
+    // Calculate capital warnings
+    const capitalWarnings = []
+    accounts.forEach(acc => {
+      const lots = acc.lots || 1
+      const quantity = inst.lot * lots
+      const tradeValue = ltp * quantity
+
+      if (acc.capital && tradeValue > acc.capital) {
+        capitalWarnings.push({
+          account: acc.name,
+          capital: acc.capital,
+          tradeValue: tradeValue,
+          lots: lots
+        })
+      }
+    })
+
     // SIM MODE
     if (config.execution_mode === "SIM") {
       const results = []
       for (const acc of accounts) {
+        const lots = acc.lots || 1
+        const quantity = inst.lot * lots
+
         state[instrumentToken][acc.name] = {
           buyposition: true,
-          entry: state[instrumentToken]?.ltp || 0,
+          entry: ltp,
           stoploss: sl,
-          takeprofit: tp
+          takeprofit: tp,
+          lots: lots,
+          quantity: quantity
         }
         results.push({
           account: acc.name,
-          result: { status: "success" }
+          result: { status: "success" },
+          lots: lots,
+          quantity: quantity
         })
       }
       storage.state.set(state)
       io.emit("position", { token: instrumentToken, state: state[instrumentToken] })
-      return res.json({ results })
+      return res.json({ results, capitalWarnings })
     }
 
     // LIVE MODE — PARALLEL
-    const promises = accounts.map(acc =>
-      placeOrder(acc, inst, "BUY")
-        .then(r => ({ account: acc.name, result: r }))
-    )
+    const promises = accounts.map(acc => {
+      const lots = acc.lots || 1
+      const quantity = inst.lot * lots
+
+      return placeOrder(acc, inst, "BUY", quantity)
+        .then(r => ({ account: acc.name, result: r, lots, quantity }))
+    })
 
     const results = await Promise.all(promises)
 
@@ -124,18 +153,68 @@ app.post("/buy", async (req, res) => {
       if (r.result.status === "success") {
         state[instrumentToken][r.account] = {
           buyposition: true,
-          entry: state[instrumentToken]?.ltp || 0,
+          entry: ltp,
           stoploss: sl,
-          takeprofit: tp
+          takeprofit: tp,
+          lots: r.lots,
+          quantity: r.quantity
         }
       }
     }
 
     storage.state.set(state)
     io.emit("position", { token: instrumentToken, state: state[instrumentToken] })
-    res.json({ results })
+    res.json({ results, capitalWarnings })
   } catch (e) {
     console.error("/buy error:", e)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Pre-flight check for buy - returns capital warnings without placing order
+app.post("/buy/preflight", (req, res) => {
+  try {
+    const { instrumentToken } = req.body
+
+    const accounts = storage.accounts.get()
+    const instruments = storage.instruments.get()
+    const state = storage.state.get()
+
+    const inst = instruments.find(i => i.token === instrumentToken)
+    if (!inst) return res.status(400).json({ error: "Invalid instrument" })
+
+    const ltp = state[instrumentToken]?.ltp || 0
+
+    // Calculate capital warnings
+    const capitalWarnings = []
+    const breakdown = []
+
+    accounts.forEach(acc => {
+      const lots = acc.lots || 1
+      const quantity = inst.lot * lots
+      const tradeValue = ltp * quantity
+
+      breakdown.push({
+        account: acc.name,
+        capital: acc.capital || 0,
+        lots,
+        quantity,
+        tradeValue
+      })
+
+      if (acc.capital && tradeValue > acc.capital) {
+        capitalWarnings.push({
+          account: acc.name,
+          capital: acc.capital,
+          tradeValue,
+          lots
+        })
+      }
+    })
+
+    res.json({ capitalWarnings, breakdown, ltp })
+  } catch (e) {
+    console.error("/buy/preflight error:", e)
     res.status(500).json({ error: e.message })
   }
 })
@@ -162,12 +241,13 @@ app.post("/sell", async (req, res) => {
 
       // Log ONE aggregated trade
       if (entryAccName) {
-        const pnl = (exit - entry) * inst.lot
+        const posQty = state[token][entryAccName].quantity || inst.lot
+        const pnl = (exit - entry) * posQty
         logTrade({
           symbol: inst.symbol,
           entry,
           exit,
-          lot: inst.lot,
+          lot: posQty,
           pnl,
           mode: "SIM",
           account: "NIL",
@@ -185,7 +265,12 @@ app.post("/sell", async (req, res) => {
 
       storage.state.set(state)
       io.emit("position", { token, state: state[token] })
-      io.emit("trade", { symbol: inst.symbol, entry, exit, lot: inst.lot, pnl: (exit - entry) * inst.lot, mode: "SIM", account: "NIL", exit_reason: "MANUAL" })
+
+      // Emit trade event only if there was a position
+      if (entryAccName) {
+        const posQty = state[token][entryAccName]?.quantity || inst.lot
+        io.emit("trade", { symbol: inst.symbol, entry, exit, lot: posQty, pnl: (exit - entry) * posQty, mode: "SIM", account: "NIL", exit_reason: "MANUAL" })
+      }
 
       return res.json({
         results: accounts.map(acc => ({
@@ -200,7 +285,8 @@ app.post("/sell", async (req, res) => {
       const pos = state[token][acc.name]
       if (!pos || !pos.buyposition) return null
 
-      return placeOrder(acc, inst, "SELL")
+      const quantity = pos.quantity || inst.lot
+      return placeOrder(acc, inst, "SELL", quantity)
         .then(r => ({ account: acc.name, result: r, pos }))
     }).filter(Boolean)
 
@@ -209,13 +295,14 @@ app.post("/sell", async (req, res) => {
     for (const r of results) {
       if (r.result.status === "success") {
         const exit = state[token].ltp || 0
-        const pnl = (exit - r.pos.entry) * inst.lot
+        const posQty = r.pos.quantity || inst.lot
+        const pnl = (exit - r.pos.entry) * posQty
 
         logTrade({
           symbol: inst.symbol,
           entry: r.pos.entry,
           exit,
-          lot: inst.lot,
+          lot: posQty,
           pnl,
           mode: "LIVE",
           account: r.account,
@@ -365,11 +452,12 @@ app.post("/trades/add", (req, res) => {
 async function autoSell(token, account, instrument, position, exitPrice, reason, mode, state) {
   console.log(`⚡ Auto-selling ${instrument.symbol} for ${account.name} - Reason: ${reason}`)
 
-  const pnl = (exitPrice - position.entry) * instrument.lot
+  const quantity = position.quantity || instrument.lot
+  const pnl = (exitPrice - position.entry) * quantity
 
   // Place sell order (for LIVE mode)
   if (mode === "LIVE") {
-    const result = await placeOrder(account, instrument, "SELL")
+    const result = await placeOrder(account, instrument, "SELL", quantity)
     if (result.status !== "success") {
       console.error(`❌ Auto-sell failed for ${account.name}:`, result.message)
       io.emit("alert", {
@@ -393,7 +481,7 @@ async function autoSell(token, account, instrument, position, exitPrice, reason,
     symbol: instrument.symbol,
     entry: position.entry,
     exit: exitPrice,
-    lot: instrument.lot,
+    lot: quantity,
     pnl,
     mode,
     account: mode === "SIM" ? "NIL" : account.name,

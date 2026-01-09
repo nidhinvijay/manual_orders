@@ -1,77 +1,243 @@
 <!DOCTYPE html>
 <html>
+
 <head>
   <title>Accounts</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+
+    table {
+      margin: 20px auto;
+      border-collapse: collapse;
+      background: white;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    }
+
+    th,
+    td {
+      padding: 10px 15px;
+      border: 1px solid #ddd;
+    }
+
+    th {
+      background: #333;
+      color: white;
+    }
+
+    input {
+      padding: 8px;
+      margin: 5px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+
+    input[type="number"] {
+      width: 80px;
+    }
+
+    button {
+      padding: 8px 16px;
+      margin: 5px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .btn-add {
+      background: #28a745;
+      color: white;
+    }
+
+    .btn-delete {
+      background: #dc3545;
+      color: white;
+    }
+
+    .btn-edit {
+      background: #007bff;
+      color: white;
+    }
+
+    .btn-save {
+      background: #17a2b8;
+      color: white;
+    }
+
+    .nav-link {
+      margin-bottom: 20px;
+    }
+
+    .nav-link a {
+      margin: 0 10px;
+      color: #007bff;
+    }
+
+    .edit-input {
+      width: 80px;
+      padding: 4px;
+    }
+  </style>
 </head>
-<body style="font-family: Arial; text-align: center; padding: 20px;">
-<h2>Zerodha Accounts</h2>
 
-<table border="1" cellpadding="6" cellspacing="0" style="margin: 0 auto; text-align: center; border-collapse: collapse;">
-  <thead>
-    <tr style="background-color: #eee;">
-      <th>Name</th>
-      <th>API Key</th>
-      <th>Access Token</th>
-      <th>Capital</th>
-      <th>Action</th>
-    </tr>
-  </thead>
-  <tbody id="rows"></tbody>
-</table>
+<body>
 
-<h3>Add Account</h3>
-<input placeholder="Name" id="name">
-<input placeholder="API Key" id="api_key">
-<input placeholder="Access Token" id="access_token">
-<input placeholder="Capital" id="capital">
-<button onclick="add()">Add Account</button>
+  <h2>Zerodha Accounts</h2>
 
-<script>
-async function load() {
-  const r = await fetch("/accounts")
-  const accounts = await r.json()
-  const rowsEl = document.getElementById("rows")
-  rowsEl.innerHTML = ""
-  accounts.forEach((a, i) => {
-    const tr = document.createElement("tr")
-    tr.innerHTML = `
-      <td>${a.name}</td>
-      <td>${a.api_key}</td>
-      <td>${a.access_token}</td>
-      <td>${a.capital}</td>
-      <td><button onclick="del(${i})">Delete</button></td>
-    `
-    rowsEl.appendChild(tr)
-  })
-}
+  <div class="nav-link">
+    <a href="dashboard.html">← Back to Dashboard</a>
+  </div>
 
-async function add() {
-  const name = document.getElementById("name").value
-  const api_key = document.getElementById("api_key").value
-  const access_token = document.getElementById("access_token").value
-  const capital = parseFloat(document.getElementById("capital").value)
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>API Key</th>
+        <th>Access Token</th>
+        <th>Capital</th>
+        <th>Lots</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
 
-  await fetch("/accounts", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, api_key, access_token, capital })
-  })
-  load()
-}
+  <h3>Add Account</h3>
+  <div>
+    <input placeholder="Name" id="name">
+    <input placeholder="API Key" id="api_key">
+    <input placeholder="Access Token" id="access_token">
+    <input type="number" placeholder="Capital" id="capital">
+    <input type="number" placeholder="Lots" id="lots" value="1" min="1">
+    <button class="btn-add" onclick="add()">Add Account</button>
+  </div>
 
-async function del(index) {
-  const r = await fetch("/accounts")
-  const accounts = await r.json()
-  accounts.splice(index, 1)
-  await fetch("/accounts/update", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(accounts)
-  })
-  load()
-}
+  <script>
+    let editingIndex = null
 
-load()
-</script>
+    async function load() {
+      const r = await fetch("/accounts")
+      const accounts = await r.json()
+      const rowsEl = document.getElementById("rows")
+      rowsEl.innerHTML = ""
+
+      accounts.forEach((a, i) => {
+        const tr = document.createElement("tr")
+
+        if (editingIndex === i) {
+          // Editing mode
+          tr.innerHTML = `
+        <td>${a.name}</td>
+        <td><input class="edit-input" id="edit-api-${i}" value="${a.api_key}"></td>
+        <td><input class="edit-input" id="edit-token-${i}" value="${a.access_token}" style="width:150px"></td>
+        <td><input type="number" class="edit-input" id="edit-capital-${i}" value="${a.capital}"></td>
+        <td><input type="number" class="edit-input" id="edit-lots-${i}" value="${a.lots || 1}" min="1"></td>
+        <td>
+          <button class="btn-save" onclick="saveEdit(${i})">Save</button>
+          <button onclick="cancelEdit()">Cancel</button>
+        </td>
+      `
+        } else {
+          // Display mode
+          tr.innerHTML = `
+        <td>${a.name}</td>
+        <td>${maskString(a.api_key)}</td>
+        <td>${maskString(a.access_token)}</td>
+        <td>₹${a.capital?.toLocaleString() || 0}</td>
+        <td><strong>${a.lots || 1}</strong></td>
+        <td>
+          <button class="btn-edit" onclick="startEdit(${i})">Edit</button>
+          <button class="btn-delete" onclick="del(${i})">Delete</button>
+        </td>
+      `
+        }
+
+        rowsEl.appendChild(tr)
+      })
+    }
+
+    function maskString(str) {
+      if (!str || str.length < 8) return str
+      return str.substring(0, 4) + "..." + str.substring(str.length - 4)
+    }
+
+    function startEdit(index) {
+      editingIndex = index
+      load()
+    }
+
+    function cancelEdit() {
+      editingIndex = null
+      load()
+    }
+
+    async function saveEdit(index) {
+      const r = await fetch("/accounts")
+      const accounts = await r.json()
+
+      accounts[index].api_key = document.getElementById(`edit-api-${index}`).value
+      accounts[index].access_token = document.getElementById(`edit-token-${index}`).value
+      accounts[index].capital = parseFloat(document.getElementById(`edit-capital-${index}`).value) || 0
+      accounts[index].lots = parseInt(document.getElementById(`edit-lots-${index}`).value) || 1
+
+      await fetch("/accounts/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(accounts)
+      })
+
+      editingIndex = null
+      load()
+    }
+
+    async function add() {
+      const name = document.getElementById("name").value
+      const api_key = document.getElementById("api_key").value
+      const access_token = document.getElementById("access_token").value
+      const capital = parseFloat(document.getElementById("capital").value) || 0
+      const lots = parseInt(document.getElementById("lots").value) || 1
+
+      if (!name || !api_key || !access_token) {
+        alert("Please fill in Name, API Key, and Access Token")
+        return
+      }
+
+      await fetch("/accounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, api_key, access_token, capital, lots })
+      })
+
+      // Clear inputs
+      document.getElementById("name").value = ""
+      document.getElementById("api_key").value = ""
+      document.getElementById("access_token").value = ""
+      document.getElementById("capital").value = ""
+      document.getElementById("lots").value = "1"
+
+      load()
+    }
+
+    async function del(index) {
+      if (!confirm("Are you sure you want to delete this account?")) return
+
+      const r = await fetch("/accounts")
+      const accounts = await r.json()
+      accounts.splice(index, 1)
+      await fetch("/accounts/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(accounts)
+      })
+      load()
+    }
+
+    load()
+  </script>
 </body>
+
 </html>

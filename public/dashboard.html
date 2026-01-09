@@ -165,6 +165,7 @@
         <th>Symbol</th>
         <th>LTP</th>
         <th>Lot</th>
+        <th>Qty</th>
         <th>Entry</th>
         <th>SL</th>
         <th>TP</th>
@@ -242,8 +243,13 @@
     })
 
     socket.on("trade", (trade) => {
-      trades.push(trade)
-      renderTrades()
+      console.log("Trade received:", trade)
+      if (trade && trade.symbol) {
+        trades.push(trade)
+        renderTrades()
+      } else {
+        console.error("Invalid trade received:", trade)
+      }
     })
 
     // Alert handler
@@ -291,6 +297,32 @@
       const stoploss = slInput?.value || null
       const takeprofit = tpInput?.value || null
 
+      // Pre-flight check for capital warnings
+      const preflightRes = await fetch("/buy/preflight", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instrumentToken: token })
+      })
+      const preflight = await preflightRes.json()
+
+      // Show capital warnings BEFORE placing order
+      if (preflight.capitalWarnings && preflight.capitalWarnings.length > 0) {
+        let warningMsg = "⚠️ CAPITAL WARNING:\n\n"
+        preflight.capitalWarnings.forEach(w => {
+          warningMsg += `${w.account}: Trade ₹${w.tradeValue.toFixed(0)} > Capital ₹${w.capital}\n`
+        })
+        warningMsg += "\nBreakdown:\n"
+        preflight.breakdown.forEach(b => {
+          warningMsg += `${b.account}: ${b.lots} lot(s) = ${b.quantity} qty @ ₹${preflight.ltp.toFixed(2)}\n`
+        })
+        warningMsg += "\nProceed anyway?"
+
+        if (!confirm(warningMsg)) {
+          return // User cancelled
+        }
+      }
+
+      // Place the actual order
       const res = await fetch("/buy", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -300,14 +332,14 @@
       const data = await res.json()
 
       if (!data.results) {
-        alert("Order failed")
+        alert("Order failed: " + (data.error || "Unknown error"))
         return
       }
 
       let msg = "BUY RESULTS:\n\n"
       data.results.forEach(r => {
         if (r.result?.status === "success") {
-          msg += `✔ ${r.account}\n`
+          msg += `✔ ${r.account} (${r.lots || 1} lots, qty: ${r.quantity || '-'})\n`
         } else {
           msg += `✖ ${r.account} → ${r.result?.message || "failed"}\n`
         }
@@ -384,8 +416,9 @@
         const buyposition = pos.buyposition
         const sl = pos.stoploss
         const tp = pos.takeprofit
+        const posQty = pos.quantity || i.lot  // Use position quantity or default to lot
 
-        const pnl = buyposition ? (ltp - entry) * i.lot : 0
+        const pnl = buyposition ? (ltp - entry) * posQty : 0
         const pnlClass = pnl >= 0 ? "pnl-positive" : "pnl-negative"
 
         const isEditing = editingToken === i.token && buyposition
@@ -401,10 +434,11 @@
               <td>${i.symbol}</td>
               <td data-ltp="${i.token}">${ltp.toFixed(2)}</td>
               <td>${i.lot}</td>
+              <td><strong>${posQty}</strong></td>
               <td>${entry.toFixed(2)}</td>
               <td><input type="number" id="sl-edit-${i.token}" value="${sl || ''}" placeholder="SL" step="0.05"></td>
               <td><input type="number" id="tp-edit-${i.token}" value="${tp || ''}" placeholder="TP" step="0.05"></td>
-              <td data-pnl="${i.token}" data-entry="${entry}" class="${pnlClass}">${pnl.toFixed(2)}</td>
+              <td data-pnl="${i.token}" data-entry="${entry}" data-qty="${posQty}" class="${pnlClass}">${pnl.toFixed(2)}</td>
               <td>
                 <button class="btn-save" onclick="saveSLTP(${i.token})">Save</button>
                 <button onclick="cancelEdit()">Cancel</button>
@@ -419,10 +453,11 @@
               <td>${i.symbol}</td>
               <td data-ltp="${i.token}">${ltp.toFixed(2)}</td>
               <td>${i.lot}</td>
+              <td><strong>${posQty}</strong></td>
               <td>${entry.toFixed(2)}</td>
               <td class="sl-tp-cell">${slDisplay}</td>
               <td class="sl-tp-cell">${tpDisplay}</td>
-              <td data-pnl="${i.token}" data-entry="${entry}" class="${pnlClass}">${pnl.toFixed(2)}</td>
+              <td data-pnl="${i.token}" data-entry="${entry}" data-qty="${posQty}" class="${pnlClass}">${pnl.toFixed(2)}</td>
               <td>
                 <button class="btn-edit" onclick="startEdit(${i.token})">Edit</button>
                 <button class="btn-sell" onclick="sell(${i.token})">Sell</button>
@@ -430,11 +465,12 @@
             `
           }
         } else {
-          // No position - show buy inputs
+          // No position - show buy inputs (Qty will be calculated at buy time)
           tr.innerHTML = `
             <td>${i.symbol}</td>
             <td data-ltp="${i.token}">${ltp.toFixed(2)}</td>
             <td>${i.lot}</td>
+            <td>--</td>
             <td>--</td>
             <td><input type="number" id="sl-input-${i.token}" placeholder="SL" step="0.05"></td>
             <td><input type="number" id="tp-input-${i.token}" placeholder="TP" step="0.05"></td>
@@ -465,9 +501,9 @@
         const pnlCell = document.querySelector(`[data-pnl="${i.token}"]`)
         if (pnlCell) {
           const entry = parseFloat(pnlCell.getAttribute("data-entry")) || 0
-          const inst = instruments.find(inst => inst.token === i.token)
-          if (inst && entry > 0) {
-            const pnl = (ltp - entry) * inst.lot
+          const qty = parseFloat(pnlCell.getAttribute("data-qty")) || i.lot
+          if (entry > 0) {
+            const pnl = (ltp - entry) * qty
             pnlCell.textContent = pnl.toFixed(2)
             pnlCell.className = pnl >= 0 ? "pnl-positive" : "pnl-negative"
           }
@@ -477,36 +513,44 @@
 
     function renderTrades() {
       const tradesEl = document.getElementById("trades")
+      if (!tradesEl) return
+
       tradesEl.innerHTML = ""
 
       // Show newest first
       const sortedTrades = [...trades].reverse()
 
       sortedTrades.forEach(t => {
-        const pnlClass = t.pnl >= 0 ? "pnl-positive" : "pnl-negative"
-        const modeClass = t.mode === "LIVE" ? "mode-live" : "mode-sim"
+        try {
+          if (!t || !t.symbol) return  // Skip invalid trades
 
-        const dt = new Date(t.timestamp)
-        const ist = new Date(dt.getTime() + 5.5 * 60 * 60 * 1000)
-        const istStr = ist.toISOString().replace("T", " ").split(".")[0]
+          const pnlClass = (t.pnl || 0) >= 0 ? "pnl-positive" : "pnl-negative"
+          const modeClass = t.mode === "LIVE" ? "mode-live" : "mode-sim"
 
-        const exitReason = t.exit_reason || "MANUAL"
-        const reasonClass = exitReason === "STOPLOSS" ? "pnl-negative" :
-          exitReason === "TAKEPROFIT" ? "pnl-positive" : ""
+          const dt = new Date(t.timestamp || Date.now())
+          const ist = new Date(dt.getTime() + 5.5 * 60 * 60 * 1000)
+          const istStr = ist.toISOString().replace("T", " ").split(".")[0]
 
-        const tr = document.createElement("tr")
-        tr.innerHTML = `
-          <td>${t.symbol}</td>
-          <td>${t.entry.toFixed(2)}</td>
-          <td>${t.exit.toFixed(2)}</td>
-          <td>${t.lot}</td>
-          <td class="${pnlClass}">${t.pnl.toFixed(2)}</td>
-          <td class="${modeClass}">${t.mode}</td>
-          <td class="${reasonClass}">${exitReason}</td>
-          <td>${t.account || "-"}</td>
-          <td>${istStr}</td>
-        `
-        tradesEl.appendChild(tr)
+          const exitReason = t.exit_reason || "MANUAL"
+          const reasonClass = exitReason === "STOPLOSS" ? "pnl-negative" :
+            exitReason === "TAKEPROFIT" ? "pnl-positive" : ""
+
+          const tr = document.createElement("tr")
+          tr.innerHTML = `
+            <td>${t.symbol}</td>
+            <td>${(t.entry || 0).toFixed(2)}</td>
+            <td>${(t.exit || 0).toFixed(2)}</td>
+            <td>${t.lot || '-'}</td>
+            <td class="${pnlClass}">${(t.pnl || 0).toFixed(2)}</td>
+            <td class="${modeClass}">${t.mode || '-'}</td>
+            <td class="${reasonClass}">${exitReason}</td>
+            <td>${t.account || "-"}</td>
+            <td>${istStr}</td>
+          `
+          tradesEl.appendChild(tr)
+        } catch (err) {
+          console.error("Error rendering trade:", t, err)
+        }
       })
     }
 
