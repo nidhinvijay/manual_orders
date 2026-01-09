@@ -232,7 +232,8 @@
           state[u.token] = { ltp: u.ltp }
         }
       })
-      renderPositions()
+      // Only update LTP and PnL cells, don't re-render entire table
+      updateLtpCells()
     })
 
     socket.on("position", (data) => {
@@ -390,6 +391,7 @@
         const isEditing = editingToken === i.token && buyposition
 
         const tr = document.createElement("tr")
+        tr.setAttribute("data-row-token", i.token)
 
         if (buyposition) {
           // Active position row
@@ -397,12 +399,12 @@
             // Editing mode
             tr.innerHTML = `
               <td>${i.symbol}</td>
-              <td>${ltp.toFixed(2)}</td>
+              <td data-ltp="${i.token}">${ltp.toFixed(2)}</td>
               <td>${i.lot}</td>
               <td>${entry.toFixed(2)}</td>
               <td><input type="number" id="sl-edit-${i.token}" value="${sl || ''}" placeholder="SL" step="0.05"></td>
               <td><input type="number" id="tp-edit-${i.token}" value="${tp || ''}" placeholder="TP" step="0.05"></td>
-              <td class="${pnlClass}">${pnl.toFixed(2)}</td>
+              <td data-pnl="${i.token}" data-entry="${entry}" class="${pnlClass}">${pnl.toFixed(2)}</td>
               <td>
                 <button class="btn-save" onclick="saveSLTP(${i.token})">Save</button>
                 <button onclick="cancelEdit()">Cancel</button>
@@ -415,12 +417,12 @@
 
             tr.innerHTML = `
               <td>${i.symbol}</td>
-              <td>${ltp.toFixed(2)}</td>
+              <td data-ltp="${i.token}">${ltp.toFixed(2)}</td>
               <td>${i.lot}</td>
               <td>${entry.toFixed(2)}</td>
               <td class="sl-tp-cell">${slDisplay}</td>
               <td class="sl-tp-cell">${tpDisplay}</td>
-              <td class="${pnlClass}">${pnl.toFixed(2)}</td>
+              <td data-pnl="${i.token}" data-entry="${entry}" class="${pnlClass}">${pnl.toFixed(2)}</td>
               <td>
                 <button class="btn-edit" onclick="startEdit(${i.token})">Edit</button>
                 <button class="btn-sell" onclick="sell(${i.token})">Sell</button>
@@ -431,7 +433,7 @@
           // No position - show buy inputs
           tr.innerHTML = `
             <td>${i.symbol}</td>
-            <td>${ltp.toFixed(2)}</td>
+            <td data-ltp="${i.token}">${ltp.toFixed(2)}</td>
             <td>${i.lot}</td>
             <td>--</td>
             <td><input type="number" id="sl-input-${i.token}" placeholder="SL" step="0.05"></td>
@@ -444,6 +446,32 @@
         }
 
         rowsEl.appendChild(tr)
+      })
+    }
+
+    // Update only LTP and PnL cells without re-rendering the table
+    function updateLtpCells() {
+      instruments.forEach(i => {
+        const s = state[i.token] || {}
+        const ltp = s.ltp || 0
+
+        // Update LTP cell
+        const ltpCell = document.querySelector(`[data-ltp="${i.token}"]`)
+        if (ltpCell) {
+          ltpCell.textContent = ltp.toFixed(2)
+        }
+
+        // Update PnL cell if exists
+        const pnlCell = document.querySelector(`[data-pnl="${i.token}"]`)
+        if (pnlCell) {
+          const entry = parseFloat(pnlCell.getAttribute("data-entry")) || 0
+          const inst = instruments.find(inst => inst.token === i.token)
+          if (inst && entry > 0) {
+            const pnl = (ltp - entry) * inst.lot
+            pnlCell.textContent = pnl.toFixed(2)
+            pnlCell.className = pnl >= 0 ? "pnl-positive" : "pnl-negative"
+          }
+        }
       })
     }
 
